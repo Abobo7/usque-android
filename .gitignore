@@ -29,3 +29,20 @@ config*.json*
 usque
 usque.exe
 dist/
+
+# Android build artifacts
+android/*.aar
+android/*-sources.jar
+android/example-app/.gradle/
+android/example-app/.idea/
+android/example-app/build/
+android/example-app/app/build/
+android/example-app/app/libs/*.aar
+android/example-app/local.properties
+android/example-app/*.apk
+android/example-app/gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/

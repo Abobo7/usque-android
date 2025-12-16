@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.UsqueVpn" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#6c5ce7</item>
+        <item name="colorPrimaryDark">#5b4cdb</item>
+        <item name="colorAccent">#00cec9</item>
+        <item name="android:statusBarColor">#1a1a2e</item>
+        <item name="android:navigationBarColor">#1a1a2e</item>
+    </style>
+</resources>
