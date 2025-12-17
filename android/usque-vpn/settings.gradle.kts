@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "UsqueVpn"
+rootProject.name = "Usque VPN"
 include(":app")

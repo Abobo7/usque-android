@@ -90,15 +90,27 @@ class UsqueVpnService : VpnService() {
                 .setSession("Usque WARP VPN")
                 .setMtu(1280)
                 
-            // Add addresses
+            // Add IPv4 address and route
             builder.addAddress(vpnIpv4, 32)
-            
-            // Route all traffic through VPN
             builder.addRoute("0.0.0.0", 0)
+            
+            // Add IPv6 address and route if available
+            if (vpnIpv6.isNotEmpty()) {
+                try {
+                    builder.addAddress(vpnIpv6, 128)
+                    builder.addRoute("::", 0)  // Route all IPv6 traffic through VPN
+                    Log.i(TAG, "IPv6 configured: $vpnIpv6")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to add IPv6, continuing with IPv4 only: ${e.message}")
+                }
+            }
 
-            // Add DNS servers
+            // Add DNS servers (both IPv4 and IPv6)
             builder.addDnsServer("1.1.1.1")
             builder.addDnsServer("1.0.0.1")
+            // IPv6 DNS
+            builder.addDnsServer("2606:4700:4700::1111")
+            builder.addDnsServer("2606:4700:4700::1001")
 
             // Exclude the Cloudflare endpoint from VPN routing
             // This is critical: the QUIC connection to Cloudflare must NOT go through the VPN

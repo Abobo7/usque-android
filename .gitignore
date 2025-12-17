@@ -33,14 +33,14 @@ dist/
 # Android build artifacts
 android/*.aar
 android/*-sources.jar
-android/example-app/.gradle/
-android/example-app/.idea/
-android/example-app/build/
-android/example-app/app/build/
-android/example-app/app/libs/*.aar
-android/example-app/local.properties
-android/example-app/*.apk
-android/example-app/gradle/wrapper/gradle-wrapper.jar
+android/usque-vpn/.gradle/
+android/usque-vpn/.idea/
+android/usque-vpn/build/
+android/usque-vpn/app/build/
+android/usque-vpn/app/libs/*.aar
+android/usque-vpn/local.properties
+android/usque-vpn/*.apk
+android/usque-vpn/gradle/wrapper/gradle-wrapper.jar
 
 # IDE
 .idea/
