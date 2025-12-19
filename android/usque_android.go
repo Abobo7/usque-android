@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -53,10 +54,8 @@ var state = &tunnelState{}
 
 // Custom connection options
 var (
-	customSNI        = "www.visa.cn" // Default SNI for censorship circumvention
-	customEndpointV4 = ""            // Custom IPv4 endpoint (empty = use config)
-	customEndpointV6 = ""            // Custom IPv6 endpoint (empty = use config)
-	useIPv6          = false         // Whether to use IPv6 endpoint
+	customSNI      = "www.visa.cn" // Default SNI for censorship circumvention
+	customEndpoint = ""            // Custom endpoint with port, e.g. "162.159.198.2:443" or "[2606:4700:103::]:1701"
 )
 
 // Register creates a new Cloudflare WARP account and saves the configuration.
@@ -244,25 +243,26 @@ func StartTunnel(configPath string, tunFd int, mtu int, packetFlow PacketFlow, c
 		return fmt.Sprintf("Failed to create TUN device: %v", err)
 	}
 
-	// Endpoint - use custom endpoint if set, otherwise use config
-	var endpointIP string
-	if useIPv6 {
-		if customEndpointV6 != "" {
-			endpointIP = customEndpointV6
-		} else {
-			endpointIP = config.AppConfig.EndpointV6
+	// Endpoint - use custom endpoint if set, otherwise use config default
+	var endpoint *net.UDPAddr
+	if customEndpoint != "" {
+		// Parse custom endpoint (supports host:port format)
+		host, port, err := parseEndpoint(customEndpoint)
+		if err != nil {
+			return fmt.Sprintf("Invalid custom endpoint '%s': %v", customEndpoint, err)
 		}
+		endpoint = &net.UDPAddr{
+			IP:   net.ParseIP(host),
+			Port: port,
+		}
+		log.Printf("Using custom endpoint: %s:%d", host, port)
 	} else {
-		if customEndpointV4 != "" {
-			endpointIP = customEndpointV4
-		} else {
-			endpointIP = config.AppConfig.EndpointV4
+		// Use default from config (IPv4)
+		endpoint = &net.UDPAddr{
+			IP:   net.ParseIP(config.AppConfig.EndpointV4),
+			Port: 443,
 		}
-	}
-	log.Printf("Using endpoint: %s", endpointIP)
-	endpoint := &net.UDPAddr{
-		IP:   net.ParseIP(endpointIP),
-		Port: 443,
+		log.Printf("Using default endpoint: %s:443", config.AppConfig.EndpointV4)
 	}
 
 	// Create context for cancellation
@@ -352,7 +352,66 @@ func IsRunning() bool {
 
 // GetVersion returns the library version
 func GetVersion() string {
-	return "1.0.1-android"
+	return "1.0.3-android"
+}
+
+// parseEndpoint parses an endpoint string in the format:
+// - "host:port" for IPv4 (e.g., "162.159.198.2:443")
+// - "[host]:port" for IPv6 (e.g., "[2606:4700:103::]:1701")
+// - "host" without port (defaults to 443)
+func parseEndpoint(endpoint string) (string, int, error) {
+	// Check if it's an IPv6 address with brackets
+	if len(endpoint) > 0 && endpoint[0] == '[' {
+		// IPv6 format: [host]:port
+		closeBracket := -1
+		for i, c := range endpoint {
+			if c == ']' {
+				closeBracket = i
+				break
+			}
+		}
+		if closeBracket == -1 {
+			return "", 0, fmt.Errorf("missing closing bracket for IPv6 address")
+		}
+
+		host := endpoint[1:closeBracket]
+
+		// Check for port after bracket
+		if closeBracket+1 < len(endpoint) && endpoint[closeBracket+1] == ':' {
+			portStr := endpoint[closeBracket+2:]
+			port, err := strconv.Atoi(portStr)
+			if err != nil {
+				return "", 0, fmt.Errorf("invalid port: %s", portStr)
+			}
+			return host, port, nil
+		}
+
+		// No port, use default
+		return host, 443, nil
+	}
+
+	// IPv4 or hostname format
+	lastColon := -1
+	for i := len(endpoint) - 1; i >= 0; i-- {
+		if endpoint[i] == ':' {
+			lastColon = i
+			break
+		}
+	}
+
+	if lastColon != -1 {
+		// Has port
+		host := endpoint[:lastColon]
+		portStr := endpoint[lastColon+1:]
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid port: %s", portStr)
+		}
+		return host, port, nil
+	}
+
+	// No port, use default
+	return endpoint, 443, nil
 }
 
 // ============================================
@@ -372,62 +431,36 @@ func GetSNI() string {
 	return customSNI
 }
 
-// SetEndpointV4 sets a custom IPv4 endpoint for the MASQUE connection.
-// Pass empty string to use the endpoint from config.json.
-// Example: "162.159.198.1"
-func SetEndpointV4(endpoint string) {
-	customEndpointV4 = endpoint
-	log.Printf("Custom endpoint v4 set to: %s", endpoint)
+// SetEndpoint sets a custom endpoint for the MASQUE connection.
+// Supports the following formats:
+//   - "162.159.198.2" (IPv4, default port 443)
+//   - "162.159.198.2:1701" (IPv4 with custom port)
+//   - "[2606:4700:103::]" (IPv6, default port 443)
+//   - "[2606:4700:103::]:1701" (IPv6 with custom port)
+//
+// Pass empty string to use the default endpoint from config.json.
+func SetEndpoint(endpoint string) {
+	customEndpoint = endpoint
+	log.Printf("Custom endpoint set to: %s", endpoint)
 }
 
-// GetEndpointV4 returns the current IPv4 endpoint setting
-func GetEndpointV4(configPath string) string {
-	if customEndpointV4 != "" {
-		return customEndpointV4
-	}
+// GetEndpoint returns the current custom endpoint setting
+func GetEndpoint() string {
+	return customEndpoint
+}
+
+// GetDefaultEndpoint returns the default endpoint from config (IPv4:443)
+func GetDefaultEndpoint(configPath string) string {
 	if err := config.LoadConfig(configPath); err == nil {
-		return config.AppConfig.EndpointV4
+		return config.AppConfig.EndpointV4 + ":443"
 	}
 	return ""
-}
-
-// SetEndpointV6 sets a custom IPv6 endpoint for the MASQUE connection.
-// Pass empty string to use the endpoint from config.json.
-// Example: "2606:4700:103::"
-func SetEndpointV6(endpoint string) {
-	customEndpointV6 = endpoint
-	log.Printf("Custom endpoint v6 set to: %s", endpoint)
-}
-
-// GetEndpointV6 returns the current IPv6 endpoint setting
-func GetEndpointV6(configPath string) string {
-	if customEndpointV6 != "" {
-		return customEndpointV6
-	}
-	if err := config.LoadConfig(configPath); err == nil {
-		return config.AppConfig.EndpointV6
-	}
-	return ""
-}
-
-// SetUseIPv6 sets whether to use IPv6 endpoint for connection.
-// Default is false (use IPv4).
-func SetUseIPv6(use bool) {
-	useIPv6 = use
-	log.Printf("UseIPv6 set to: %v", use)
-}
-
-// GetUseIPv6 returns whether IPv6 endpoint is being used
-func GetUseIPv6() bool {
-	return useIPv6
 }
 
 // ResetConnectionOptions resets all connection options to defaults
 func ResetConnectionOptions() {
 	customSNI = "www.visa.cn"
-	customEndpointV4 = ""
-	customEndpointV6 = ""
-	useIPv6 = false
+	customEndpoint = ""
 	log.Println("Connection options reset to defaults")
 }
 

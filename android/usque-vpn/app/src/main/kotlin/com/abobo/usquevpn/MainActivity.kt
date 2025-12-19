@@ -16,9 +16,7 @@ class MainActivity : Activity() {
         private const val VPN_REQUEST_CODE = 1001
         private const val PREFS_NAME = "UsqueVpnPrefs"
         private const val KEY_SNI = "sni"
-        private const val KEY_ENDPOINT_V4 = "endpoint_v4"
-        private const val KEY_ENDPOINT_V6 = "endpoint_v6"
-        private const val KEY_USE_IPV6 = "use_ipv6"
+        private const val KEY_ENDPOINT = "endpoint"
     }
 
     private lateinit var prefs: SharedPreferences
@@ -66,34 +64,21 @@ class MainActivity : Activity() {
     }
 
     private fun loadSavedSettings() {
-        val configPath = "${filesDir.absolutePath}/config.json"
-        
         // Load SNI
         val savedSni = prefs.getString(KEY_SNI, "www.visa.cn") ?: "www.visa.cn"
         Usqueandroid.setSNI(savedSni)
         
-        // Load endpoints
-        val savedV4 = prefs.getString(KEY_ENDPOINT_V4, "") ?: ""
-        if (savedV4.isNotEmpty()) {
-            Usqueandroid.setEndpointV4(savedV4)
+        // Load endpoint
+        val savedEndpoint = prefs.getString(KEY_ENDPOINT, "") ?: ""
+        if (savedEndpoint.isNotEmpty()) {
+            Usqueandroid.setEndpoint(savedEndpoint)
         }
-        
-        val savedV6 = prefs.getString(KEY_ENDPOINT_V6, "") ?: ""
-        if (savedV6.isNotEmpty()) {
-            Usqueandroid.setEndpointV6(savedV6)
-        }
-        
-        // Load IPv6 preference
-        val useIpv6 = prefs.getBoolean(KEY_USE_IPV6, false)
-        Usqueandroid.setUseIPv6(useIpv6)
     }
 
-    private fun saveSettings(sni: String, endpointV4: String, endpointV6: String, useIpv6: Boolean) {
+    private fun saveSettings(sni: String, endpoint: String) {
         prefs.edit()
             .putString(KEY_SNI, sni)
-            .putString(KEY_ENDPOINT_V4, endpointV4)
-            .putString(KEY_ENDPOINT_V6, endpointV6)
-            .putBoolean(KEY_USE_IPV6, useIpv6)
+            .putString(KEY_ENDPOINT, endpoint)
             .apply()
     }
 
@@ -101,39 +86,33 @@ class MainActivity : Activity() {
         val dialogView = layoutInflater.inflate(R.layout.dialog_settings, null)
         
         val sniInput = dialogView.findViewById<EditText>(R.id.sni_input)
-        val endpointV4Input = dialogView.findViewById<EditText>(R.id.endpoint_v4_input)
-        val endpointV6Input = dialogView.findViewById<EditText>(R.id.endpoint_v6_input)
-        val useIpv6Switch = dialogView.findViewById<Switch>(R.id.use_ipv6_switch)
+        val endpointInput = dialogView.findViewById<EditText>(R.id.endpoint_input)
         
         val configPath = "${filesDir.absolutePath}/config.json"
         
         // Load current values from prefs (persisted) 
         sniInput.setText(prefs.getString(KEY_SNI, Usqueandroid.getSNI()))
-        endpointV4Input.setText(prefs.getString(KEY_ENDPOINT_V4, Usqueandroid.getEndpointV4(configPath)))
-        endpointV6Input.setText(prefs.getString(KEY_ENDPOINT_V6, Usqueandroid.getEndpointV6(configPath)))
-        useIpv6Switch.isChecked = prefs.getBoolean(KEY_USE_IPV6, Usqueandroid.getUseIPv6())
+        
+        val currentEndpoint = prefs.getString(KEY_ENDPOINT, "") ?: ""
+        if (currentEndpoint.isNotEmpty()) {
+            endpointInput.setText(currentEndpoint)
+        } else {
+            endpointInput.setText(Usqueandroid.getDefaultEndpoint(configPath))
+        }
         
         AlertDialog.Builder(this)
             .setTitle("Connection Settings")
             .setView(dialogView)
             .setPositiveButton("Save") { _, _ ->
                 val sni = sniInput.text.toString()
-                val v4 = endpointV4Input.text.toString()
-                val v6 = endpointV6Input.text.toString()
-                val useIpv6 = useIpv6Switch.isChecked
+                val endpoint = endpointInput.text.toString()
                 
                 // Save to SharedPreferences
-                saveSettings(sni, v4, v6, useIpv6)
+                saveSettings(sni, endpoint)
                 
                 // Apply to Go library
                 Usqueandroid.setSNI(sni)
-                if (v4.isNotEmpty()) {
-                    Usqueandroid.setEndpointV4(v4)
-                }
-                if (v6.isNotEmpty()) {
-                    Usqueandroid.setEndpointV6(v6)
-                }
-                Usqueandroid.setUseIPv6(useIpv6)
+                Usqueandroid.setEndpoint(endpoint)
                 
                 Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show()
                 updateUI()
@@ -141,7 +120,7 @@ class MainActivity : Activity() {
             .setNegativeButton("Cancel", null)
             .setNeutralButton("Reset") { _, _ ->
                 // Reset to defaults
-                saveSettings("www.visa.cn", "", "", false)
+                saveSettings("www.visa.cn", "")
                 Usqueandroid.resetConnectionOptions()
                 Toast.makeText(this, "Settings reset to defaults", Toast.LENGTH_SHORT).show()
                 updateUI()
@@ -224,13 +203,12 @@ class MainActivity : Activity() {
         val currentSni = prefs.getString(KEY_SNI, Usqueandroid.getSNI()) ?: "www.visa.cn"
         sniText.text = "SNI: $currentSni"
         
-        val useIpv6 = prefs.getBoolean(KEY_USE_IPV6, false)
-        val endpoint = if (useIpv6) {
-            prefs.getString(KEY_ENDPOINT_V6, Usqueandroid.getEndpointV6(configPath)) ?: ""
+        val currentEndpoint = prefs.getString(KEY_ENDPOINT, "") ?: ""
+        val displayEndpoint = if (currentEndpoint.isNotEmpty()) {
+            currentEndpoint
         } else {
-            prefs.getString(KEY_ENDPOINT_V4, Usqueandroid.getEndpointV4(configPath)) ?: ""
+            Usqueandroid.getDefaultEndpoint(configPath)
         }
-        val ipVersion = if (useIpv6) "v6" else "v4"
-        endpointText.text = "Endpoint ($ipVersion): $endpoint"
+        endpointText.text = "Endpoint: $displayEndpoint"
     }
 }

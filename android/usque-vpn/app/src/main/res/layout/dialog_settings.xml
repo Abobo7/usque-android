@@ -22,59 +22,29 @@
         android:inputType="textUri"
         android:layout_marginBottom="16dp" />
 
-    <!-- IPv4 Endpoint -->
+    <!-- Endpoint Input -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="IPv4 Endpoint"
+        android:text="Endpoint (host:port)"
         android:textColor="#666666"
         android:textSize="12sp"
         android:layout_marginBottom="4dp" />
 
     <EditText
-        android:id="@+id/endpoint_v4_input"
+        android:id="@+id/endpoint_input"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="162.159.198.1"
+        android:hint="162.159.198.1:443"
         android:inputType="textUri"
-        android:layout_marginBottom="16dp" />
+        android:layout_marginBottom="8dp" />
 
-    <!-- IPv6 Endpoint -->
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="IPv6 Endpoint"
-        android:textColor="#666666"
-        android:textSize="12sp"
-        android:layout_marginBottom="4dp" />
-
-    <EditText
-        android:id="@+id/endpoint_v6_input"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="2606:4700:103::"
-        android:inputType="textUri"
-        android:layout_marginBottom="16dp" />
-
-    <!-- Use IPv6 Switch -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
-
-        <TextView
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Use IPv6 Endpoint"
-            android:textSize="16sp" />
-
-        <Switch
-            android:id="@+id/use_ipv6_switch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-
-    </LinearLayout>
+        android:text="Supported formats:\n• IPv4: 162.159.198.1:443\n• IPv6: [2606:4700:103::1]:443\n• Without port defaults to 443"
+        android:textColor="#888888"
+        android:textSize="11sp"
+        android:lineSpacingExtra="2dp" />
 
 </LinearLayout>
