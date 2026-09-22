@@ -211,6 +211,7 @@ class UsqueVpnService : VpnService() {
                                 Log.e(TAG, "Failed to write packet to TUN", e)
                             }
                         }
+                        Unit
                     }
                 }
             }
