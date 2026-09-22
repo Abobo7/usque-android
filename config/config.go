@@ -15,8 +15,9 @@ type Config struct {
 	PrivateKey     string `json:"private_key"`      // Base64-encoded ECDSA private key
 	EndpointV4     string `json:"endpoint_v4"`      // IPv4 address of the endpoint
 	EndpointV6     string `json:"endpoint_v6"`      // IPv6 address of the endpoint
+	EndpointH2V4   string `json:"endpoint_h2_v4"`   // IPv4 address used in HTTP/2 mode
+	EndpointH2V6   string `json:"endpoint_h2_v6"`   // IPv6 address used in HTTP/2 mode
 	EndpointPubKey string `json:"endpoint_pub_key"` // PEM-encoded ECDSA public key of the endpoint to verify against
-	License        string `json:"license"`          // Application license key
 	ID             string `json:"id"`               // Device unique identifier
 	AccessToken    string `json:"access_token"`     // Authentication token for API access
 	IPv4           string `json:"ipv4"`             // Assigned IPv4 address
@@ -37,11 +38,12 @@ var ConfigLoaded bool
 // Returns:
 //   - error: An error if the configuration file cannot be loaded or parsed.
 func LoadConfig(configPath string) error {
+	ConfigLoaded = false
 	file, err := os.Open(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to open config file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&AppConfig); err != nil {
@@ -61,11 +63,17 @@ func LoadConfig(configPath string) error {
 // Returns:
 //   - error: An error if the configuration file cannot be written.
 func (*Config) SaveConfig(configPath string) error {
-	file, err := os.Create(configPath)
+	// The config contains the private key and API bearer token. Keep it
+	// private even when the caller's umask is permissive, and tighten the mode
+	// of an existing file as well.
+	file, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("failed to protect config file: %v", err)
+	}
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")

@@ -19,10 +19,9 @@ android/
 ### 1. Build Go Library (if not already built)
 
 ```bash
-cd <project-root>
-# Build the Android library
-gomobile bind -v -target=android/arm64,android/arm -androidapi 24 \
-    -ldflags="-s -w" -o android/usque.aar github.com/Diniboy1123/usque/android
+cd <project-root>/android
+make init       # once per Go/Android toolchain
+make android
 ```
 
 ### 2. Build Android App
@@ -50,6 +49,8 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 - ✅ Custom SNI configuration
 - ✅ Custom endpoint configuration
 - ✅ Persistent settings
+- ✅ Foreground-service notification and Android 14 special-use declaration
+- ✅ Automatic reconnect after a transient tunnel loss
 
 ## See Also
 

@@ -116,20 +116,28 @@ func GenerateCert(privKey *ecdsa.PrivateKey, pubKey *ecdsa.PublicKey) ([][]byte,
 	return [][]byte{cert}, nil
 }
 
-// DefaultQuicConfig returns a MASQUE compatible default QUIC configuration with specified keep-alive period and initial packet size.
+// DefaultQuicConfig returns a MASQUE-compatible default QUIC configuration.
+//
+// When initialPacketSize is 0, Path MTU Discovery remains enabled.
 //
 // Parameters:
 //   - keepalivePeriod: time.Duration - The duration for sending QUIC keep-alive packets.
-//   - initialPacketSize: uint16 - The initial size of QUIC packets. (1242 seems used by the original implementation)
+//   - initialPacketSize: uint16 - The custom initial size of QUIC packets (0 = auto with PMTU discovery).
 //
 // Returns:
 //   - *quic.Config: A pointer to a configured QUIC configuration object.
 func DefaultQuicConfig(keepalivePeriod time.Duration, initialPacketSize uint16) *quic.Config {
-	return &quic.Config{
-		EnableDatagrams:   true,
-		InitialPacketSize: initialPacketSize,
-		KeepAlivePeriod:   keepalivePeriod,
+	cfg := &quic.Config{
+		EnableDatagrams: true,
+		KeepAlivePeriod: keepalivePeriod,
 	}
+
+	if initialPacketSize > 0 {
+		cfg.InitialPacketSize = initialPacketSize
+		cfg.DisablePathMTUDiscovery = true
+	}
+
+	return cfg
 }
 
 // parsePortMapping is an internal helper function that parses a port mapping string into its components.

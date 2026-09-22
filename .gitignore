@@ -40,7 +40,6 @@ android/usque-vpn/app/build/
 android/usque-vpn/app/libs/*.aar
 android/usque-vpn/local.properties
 android/usque-vpn/*.apk
-android/usque-vpn/gradle/wrapper/gradle-wrapper.jar
 
 # IDE
 .idea/
