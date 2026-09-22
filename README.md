@@ -2,12 +2,11 @@
 
 🥚➡️🍏🍎
 
-Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connnect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel (currently Linux only), a SOCKS5 proxy, and a HTTP proxy.
+Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE mode. It leverages the [Connect-IP (RFC 9484)](https://datatracker.ietf.org/doc/rfc9484/) protocol and comes with many operation modes including a native tunnel, SOCKS5 and HTTP proxies, and faster TCP-only L4 proxy variants.
 
 ## Table of Contents
 
 - [usque](#usque)
-          - [🥚➡️🍏🍎](#️)
   - [Table of Contents](#table-of-contents)
   - [Installation](#installation)
   - [Building from source](#building-from-source)
@@ -22,7 +21,13 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
       - [Routes on Windows](#routes-on-windows)
     - [SOCKS5 Proxy Mode (easy, cross-platform)](#socks5-proxy-mode-easy-cross-platform)
     - [HTTP Proxy Mode (easy, cross-platform)](#http-proxy-mode-easy-cross-platform)
+    - [L4 Proxy Modes (easy, cross-platform)](#l4-proxy-modes-easy-cross-platform)
     - [Port Forwarding Mode (for Advanced Users, cross-platform)](#port-forwarding-mode-for-advanced-users-cross-platform)
+    - [Connect/Disconnect Hooks](#connectdisconnect-hooks)
+      - [Example on Linux](#example-on-linux)
+      - [Example on Windows](#example-on-windows)
+    - [TCP and HTTP/2 Support](#tcp-and-http2-support)
+      - [HTTP/2 Configuration](#http2-configuration)
     - [Configuration](#configuration)
       - [Fields](#fields)
   - [ZeroTrust support](#zerotrust-support)
@@ -38,6 +43,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
     - [Why would you still switch?](#why-would-you-still-switch)
   - [Protocol \& research details](#protocol--research-details)
   - [Why was this built?](#why-was-this-built)
+  - [Why did you fork connect-ip-go?](#why-did-you-fork-connect-ip-go)
   - [Why the name?](#why-the-name)
   - [Contributing](#contributing)
   - [Acknowledgements](#acknowledgements)
@@ -45,7 +51,7 @@ Usque is an open-source reimplementation of the Cloudflare WARP client's MASQUE 
 
 ## Installation
 
-You can download the latest release from the [releases page](https://github.com/Diniboy1123/usque/releases). For now, Android (`arm64`), Linux (`armv5`, `armv6`, `armv7`, `arm64`, `amd64`), Windows (`arm64`, `amd64`) and Darwin (`arm64`, `amd64`) binaries are provided. **However only the Linux `amd64` binary was tested.** If you have a different platform, you can build from source.
+You can download the latest release from the [releases page](https://github.com/Diniboy1123/usque/releases). For now, Android (`arm64`), Linux (`armv5`, `armv6`, `armv7`, `arm64`, `amd64`), Windows (`arm64`, `amd64`, `386`) and Darwin (`arm64`, `amd64`) binaries are provided. **However only the Linux `amd64` binary was tested.** If you have a different platform, you can build from source.
 
 Extract the archive and you will find a binary named `usque` in the root directory. You can move this binary to a directory in your `PATH` to make it accessible from anywhere.
 
@@ -53,7 +59,7 @@ Extract the archive and you will find a binary named `usque` in the root directo
 
 Since the tool is written in Go, it should be rather trivial.
 
-1. Ensure that you have Go installed on your system. You can download it from [here](https://golang.org/dl/). At least Go 1.24.1 is required.
+1. Ensure that you have Go installed on your system. You can download it from [here](https://golang.org/dl/). At least Go 1.26.3 is required.
 2. Clone this repository and switch to the project's root directory
 3. Build the project using the following command:
 ```shell
@@ -91,14 +97,17 @@ Usage:
   usque [command]
 
 Available Commands:
-  completion  Generate the autocompletion script for the specified shell
-  enroll      Enrolls a MASQUE private key and switches mode
-  help        Help about any command
-  http-proxy  Expose Warp as an HTTP proxy with CONNECT support
-  nativetun   Expose Warp as a native TUN device
-  portfw      Forward ports through a MASQUE tunnel
-  register    Register a new client and enroll a device key
-  socks       Expose Warp as a SOCKS5 proxy
+  completion    Generate the autocompletion script for the specified shell
+  enroll        Enrolls a MASQUE private key and switches mode
+  help          Help about any command
+  http-proxy    Expose Warp as an HTTP proxy with CONNECT support
+  l4-http-proxy Expose Warp as an L4 TCP-only HTTP proxy with CONNECT support
+  l4-socks      Expose Warp as an L4 TCP-only SOCKS5 proxy
+  nativetun     Expose Warp as a native TUN device
+  portfw        Forward ports through a MASQUE tunnel
+  register      Register a new client and enroll a device key
+  socks         Expose Warp as a SOCKS5 proxy
+  version       Print the version number of usque
 
 Flags:
   -c, --config string   config file (default is config.json) (default "config.json")
@@ -145,7 +154,7 @@ $ ./usque enroll
 
 ### Native Tunnel Mode (for Advanced Users, Linux and Windows only!)
 
-The native tunnel is probably the most **efficient** mode of operation *(as of now)*. 
+The native tunnel is a good choice when you want a real network interface. It is also one of the faster modes of operation.
 
 #### On Linux
 
@@ -242,6 +251,9 @@ route add ::/0 [TUNNEL_GATEWAY] metric 1 if [TUN_INTERFACE_INDEX]
 
 ### SOCKS5 Proxy Mode (easy, cross-platform)
 
+> [!TIP]
+> If you are OK with using QUIC (UDP) to connect to WARP and don't need UDP support for your SOCKS proxy, [L4 mode](#l4-proxy-modes-easy-cross-platform) is more efficient.
+
 If you just want to expose the tunnel as a quickly deployable proxy and your client supports SOCKS5, this mode is for you. It **supports both IPv4 and IPv6**. **TCP and UDP** even! It is also **cross-platform** and doesn't require any special kernel modules or root privileges. However it emulates an entire user-space network stack, so it can be resource hungry.
 
 To start a SOCKS5 proxy, you can run:
@@ -275,6 +287,9 @@ curl -x socks5://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/tra
 
 ### HTTP Proxy Mode (easy, cross-platform)
 
+> [!TIP]
+> If you are OK with using QUIC (UDP) to connect to WARP, [L4 mode](#l4-proxy-modes-easy-cross-platform) is more efficient.
+
 Another easy to "*get up and running*" mode of operation is the HTTP proxy mode. **Almost all clients support HTTP proxies**. Regular HTTP unencrypted traffic sent to this proxy will simply be forwarded to the WARP network. For HTTPS and any other **TCP traffic**, the proxy exposes a HTTP `CONNECT` method. This mode is **cross-platform** and doesn't require any special kernel modules or root privileges. However it emulates an entire user-space network stack, so it can be resource hungry.
 
 To start a HTTP proxy, you can run:
@@ -306,6 +321,24 @@ curl -x http://myuser:mypass@localhost:8080 https://cloudflare.com/cdn-cgi/trace
 > [!NOTE]
 > For now only one `user:pass` is supported.
 
+### L4 Proxy Modes (easy, cross-platform)
+
+If your clients are fine with TCP only proxying, the L4 modes are the lighter option. They use direct HTTP/3 CONNECT streams, skip UDP/datagram handling, and avoid the extra user-space networking stack that the full SOCKS5 and HTTP proxy modes need. They are cross-platform and do not require elevated privileges.
+
+Use `l4-http-proxy` when you want an HTTP proxy with CONNECT support, or `l4-socks` when you want SOCKS5 compatibility:
+
+```shell
+$ ./usque l4-http-proxy
+```
+
+```shell
+$ ./usque l4-socks
+```
+
+They support the same bind, port, auth, DNS, and hook flags as the other proxy modes. **For TCP-only workloads, these modes should generally outperform the full proxy stack.**
+
+More details [in the wiki](https://github.com/Diniboy1123/usque/wiki/L4-proxy-mode).
+
 ### Port Forwarding Mode (for Advanced Users, cross-platform)
 
 While most other modes expose the tunnel in some way or another, this mode is intended for more advanced use-cases. Think of it a bit like SSH forwarding. It allows you to either forward a specific port from the host to the WARP network or from the WARP network to the host.
@@ -335,6 +368,92 @@ $ ./usque portfw -R 100.96.0.3:8080:localhost:8080 -L localhost:8081:100.96.0.2:
 > [!TIP]
 > Any number of ports are supported. You can chain many ports together if you specify the flag and the corresponding argument one after another.
 
+### Connect/Disconnect Hooks
+
+All tunnel modes can invoke an external executable after each successful tunnel connect and after each tunnel loss. This is useful for re-applying routes, firewall rules, or notifications without hard-coding them into the tool.
+
+- `--on-connect <path>`: executed after every successful connect (including reconnects).
+- `--on-disconnect <path>`: executed after every tunnel loss.
+
+Both flags take a path to a single executable. The path is **exececuted directly**, so no shell is spawned, and no arguments are passed. If you need a one-liner like `ip route add ...`, wrap it in a small shell script.
+
+Hooks run **fire-and-forget** in the background, so a hung hook cannot stall the tunnel. Their stdout and stderr are captured line-by-line and forwarded to the standard log with a `hook[connect]` / `hook[disconnect]` prefix.
+
+The hook subprocess inherits the parent environment (so `PATH`, `HOME`, etc. work normally) plus the following `USQUE_*` variables:
+
+- `USQUE_EVENT`: `connect` or `disconnect`.
+- `USQUE_MODE`: `nativetun`, `socks`, `http-proxy`, `l4-socks`, `l4-http-proxy`, or `portfw`.
+- `USQUE_IFACE`: tun interface name (only set in `nativetun` mode).
+- `USQUE_IPV4`: internal IPv4 from the config.
+- `USQUE_IPV6`: internal IPv6 from the config.
+- `USQUE_ENDPOINT`: MASQUE endpoint address the tunnel is using.
+
+#### Example on Linux
+
+```shell
+$ sudo ./usque nativetun \
+    --on-connect /etc/usque/up.sh \
+    --on-disconnect /etc/usque/down.sh
+```
+
+```shell
+# /etc/usque/up.sh
+#!/bin/sh
+set -e
+ip route replace 162.159.198.1/32 via 192.168.1.1 dev eth0
+ip route del default || true
+ip route replace default dev "$USQUE_IFACE"
+ip -6 route replace default dev "$USQUE_IFACE"
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+```
+
+#### Example on Windows
+
+On Windows you can point `--on-connect` / `--on-disconnect` at a `.bat`, `.cmd`, or `.exe`. Env vars are accessed as `%USQUE_IFACE%`, `%USQUE_IPV4%`, etc. Run `usque` in an elevated Command Prompt so the hook inherits the privileges needed to modify routes.
+
+```cmd
+> usque.exe nativetun ^
+    --on-connect C:\usque\up.bat ^
+    --on-disconnect C:\usque\down.bat
+```
+
+```bat
+@rem C:\usque\up.bat
+@echo off
+netsh interface ipv4 delete route 0.0.0.0/0 "%USQUE_IFACE%" >nul 2>&1
+netsh interface ipv4 add route    0.0.0.0/0 "%USQUE_IFACE%" 0.0.0.0
+netsh interface ipv6 delete route ::/0      "%USQUE_IFACE%" >nul 2>&1
+netsh interface ipv6 add route    ::/0      "%USQUE_IFACE%" ::
+```
+
+If you prefer PowerShell, keep the hook itself pointed at a small `.bat` stub that invokes `powershell.exe -NoProfile -ExecutionPolicy Bypass -File up.ps1`. the hook runner does not accept extra arguments, so AFAIK a wrapper is the simplest way to reach a `.ps1`.
+
+> [!TIP]
+> Because `on-connect` fires on every reconnect, write your scripts to be idempotent. Prefer `ip route replace` / `netsh ... delete` + `add` over plain `add`, check-before-add for firewall rules, and so on.
+
+> [!NOTE]
+> Hooks are not run on initial process startup before the first connect, nor on final process shutdown. They fire strictly in response to tunnel lifecycle events.
+
+### TCP and HTTP/2 Support
+
+While `usque` was originally designed with a focus on **QUIC** and **HTTP/3**, Cloudflare has since introduced TCP fallback support in their official clients. `usque` now supports this connection method via `--http2`.
+
+For full details and troubleshooting, see the wiki page: [HTTP/2 support](https://github.com/Diniboy1123/usque/wiki/HTTP-2-support).
+
+#### HTTP/2 Configuration
+
+To connect via TCP/HTTP/2, use the `--http2` CLI flag.
+
+Because endpoints cannot be reliably pulled from the API, you can manage HTTP/2 connections with:
+
+- `endpoint_h2_v4`: IPv4 address for HTTP/2 mode.
+- `endpoint_h2_v6`: IPv6 address for HTTP/2 mode.
+
+Default behavior:
+
+- If `endpoint_h2_v4` is not set, `usque` uses `162.159.198.2`.
+- `endpoint_h2_v6` is intentionally empty by default and must be configured manually when you want HTTP/2 over IPv6.
+
 ### Configuration
 
 For simplicity, the tool uses a JSON configuration file. The default file is `config.json` in the current directory. You can specify a different file using the `-c` flag. This will be respected by all subcommands. Without a configuration file only the `register` subcommand will work.
@@ -346,6 +465,8 @@ Example config:
   "private_key": "M...redacted...==",
   "endpoint_v4": "162.159.198.1",
   "endpoint_v6": "2606:4700:103::",
+  "endpoint_h2_v4": "162.159.198.2",
+  "endpoint_h2_v6": "",
   "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIaU7MToJm9NKp8YfGxR6r+/h4mcG\n7SxI8tsW8OR1A5tv/zCzVbCRRh2t87/kxnP6lAy0lkr7qYwu+ox+k3dr6w==\n-----END PUBLIC KEY-----\n",
   "license": "A...redacted...Z",
   "id": "00000000-0000-0000-0000-000000000000",
@@ -360,6 +481,8 @@ Example config:
 - `private_key`: Base64 encoded ECDSA private key on the NIST P-256 curve in ASN.1 DER format. **Confidential.** This is used for device authentication.
 - `endpoint_v4`: IPv4 address of the Cloudflare WARP endpoint. **Public.** Used for connecting to the WARP network.
 - `endpoint_v6`: IPv6 address of the Cloudflare WARP endpoint. **Public.** Used for connecting to the WARP network.
+- `endpoint_h2_v4`: IPv4 address used by `--http2`. Defaults to `162.159.198.2` when empty. **Public.**
+- `endpoint_h2_v6`: IPv6 address used by `--http2`. Empty by default and must be set manually for HTTP/2 over IPv6. **Public.**
 - `endpoint_pub_key`: Base64 encoded ECDSA public key on the NIST P-256 curve in PEM format. **Public.** This is used to ensure that we are indeed talking to the Cloudflare WARP endpoint and not being [MiTM](https://en.wikipedia.org/wiki/Man-in-the-middle_attack)'d.
 - `license`: License returned by the server for our account. **Confidential.** With this, you can pair multiple devices to the same account.
 - `id`: Device ID given by the server to us. **Public.** This is used for device identification and API calls.
@@ -430,7 +553,7 @@ As a starting point, you can reach out to the [`api/`](api/) package. For exampl
 
 ## Known Issues
 
-- **remote end disconnects**: If you are inactive for a while, the remote end might disconnect you with a `H3_NO_ERROR` error. Similar behavior was observed earlier on their well studied `WireGuard` implementation where too long open connections with not significant network activity were disconnected. The official apps just reconnect once that happens, therefore I implemented a similar behavior. Therefore if you see disconnects, don't worry, it's probably just the remote end. The tool will reconnect automatically.
+- **remote end disconnects**: If you are inactive for a while, the remote end might disconnect you with a `H3_NO_ERROR` error. Similar behavior was observed earlier on their well studied `WireGuard` implementation where too long open connections with not significant network activity were disconnected. The official apps just reconnect once that happens, therefore I implemented a similar behavior. Therefore if you see disconnects, don't worry, it's probably just the remote end. The tool will reconnect automatically once you generate some outgoing traffic.
 - **interaction with the Cloudflare API is limited**: This one is also intended. The tool's primary focus is MASQUE. If you want better support, I suggest the official client or [wgcf](https://github.com/ViRb3/wgcf).
 - **no support for WireGuard**: This is a MASQUE client. If you want WireGuard, use the official client or [wgcf](https://github.com/ViRb3/wgcf).
 - **no support for DoH etc.**: Yeah, the official clients expose a lot of extra DNS related features. I wanted to keep this lightweight. Those will probably not be supported by me. If you want, you are free to use 3rd party DoH clients and configure them to use the tunnel interface. DNS over Warp should already be working on all modes except for the native tunnel mode as all DNS queries made inside the tunnel will go through the tunnel (unless you use the `-l` flag).
@@ -460,7 +583,7 @@ At the end of the day, if you are happy with WireGuard, I don't see a reason to 
 
 ## Protocol & research details
 
-This document would be large and too horrific for the average reader if I included all the details about the protocol and the research I did. If you are one of the few people who would be interested in some details, please refer to the [RESEARCH.md](RESEARCH.md) file. That one summarizes the research I did and the protocol details I found in a blog post like format. In the future I plan to write a clear and concise protocol document as well that will be linked here.
+This document would be large and too horrific for the average reader if I included all the details about the protocol and the research I did. If you are one of the few people who would be interested in some details, please refer to the [RESEARCH.md](RESEARCH.md) file. That one summarizes the research I did and the protocol details I found in a blog post like format. In the future I plan to write a clear and concise protocol document as well that will be linked here. Currently only the HTTP/3 is included there.
 
 ## Why was this built?
 

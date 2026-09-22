@@ -93,6 +93,7 @@ builds:
     goarch:
       - arm64
       - amd64
+      - "386"
     env:
       - CGO_ENABLED=0
     flags:

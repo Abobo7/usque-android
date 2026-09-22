@@ -9,13 +9,16 @@ package usqueandroid
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -23,54 +26,43 @@ import (
 	"github.com/Diniboy1123/usque/internal"
 )
 
-// PacketFlow is the interface that Android must implement to exchange packets with the VPN
-// This interface is used for bidirectional packet flow between Android TUN and Go tunnel
+// PacketFlow is the interface that Android must implement to exchange packets
+// with the VPN TUN device. Go calls WritePacket for packets received from the
+// Cloudflare tunnel.
 type PacketFlow interface {
-	// WritePacket writes an IP packet to the Android TUN device
-	// Called by Go when a packet is received from Cloudflare
 	WritePacket(data []byte)
 }
 
-// VpnStateCallback is the interface for VPN state notifications
+// VpnStateCallback is the interface for VPN state notifications.
 type VpnStateCallback interface {
-	// OnConnected is called when the VPN successfully connects to Cloudflare
 	OnConnected()
-	// OnDisconnected is called when the VPN disconnects
 	OnDisconnected(reason string)
-	// OnError is called when an error occurs
 	OnError(message string)
 }
 
-// tunnelState holds the state of the running tunnel
 type tunnelState struct {
 	mu        sync.Mutex
 	running   bool
+	connected bool
 	cancel    context.CancelFunc
-	inputChan chan []byte
 	callback  VpnStateCallback
+	device    *AndroidTunDevice
+	runID     uint64
 }
 
 var state = &tunnelState{}
 
-// Custom connection options
 var (
-	customSNI      = "www.visa.cn" // Default SNI for censorship circumvention
-	customEndpoint = ""            // Custom endpoint with port, e.g. "162.159.198.2:443" or "[2606:4700:103::]:1701"
+	optionsMu      sync.RWMutex
+	customSNI      = "www.visa.cn" // Default SNI for censorship circumvention.
+	customEndpoint = ""            // Optional endpoint, e.g. 162.159.198.2:443.
 )
 
 // Register creates a new Cloudflare WARP account and saves the configuration.
 // This should be called once before starting the VPN.
-//
-// Parameters:
-//   - configPath: Absolute path where the config.json will be saved
-//   - deviceName: Optional device name (can be empty)
-//
-// Returns:
-//   - error string if registration fails, empty string on success
 func Register(configPath string, deviceName string) string {
-	// Already registered?
 	if err := config.LoadConfig(configPath); err == nil {
-		return "" // Config already exists and is valid
+		return ""
 	}
 
 	accountData, err := api.Register(internal.DefaultModel, internal.DefaultLocale, "", true)
@@ -83,20 +75,31 @@ func Register(configPath string, deviceName string) string {
 		return fmt.Sprintf("Failed to generate key pair: %v", err)
 	}
 
-	updatedAccountData, apiErr, err := api.EnrollKey(accountData, pubKey, deviceName)
+	updatedAccountData, err := api.EnrollKey(accountData.ID, accountData.Token, pubKey, deviceName)
 	if err != nil {
-		if apiErr != nil {
-			return fmt.Sprintf("Failed to enroll key: %v (API: %s)", err, apiErr.ErrorsAsString("; "))
-		}
 		return fmt.Sprintf("Failed to enroll key: %v", err)
+	}
+	if len(updatedAccountData.Config.Peers) == 0 {
+		return "Failed to enroll key: Cloudflare returned no tunnel peer"
+	}
+
+	peer := updatedAccountData.Config.Peers[0]
+	endpointV4, err := normalizePeerEndpoint(peer.Endpoint.V4, false)
+	if err != nil {
+		return fmt.Sprintf("Failed to parse IPv4 endpoint: %v", err)
+	}
+	endpointV6, err := normalizePeerEndpoint(peer.Endpoint.V6, true)
+	if err != nil {
+		return fmt.Sprintf("Failed to parse IPv6 endpoint: %v", err)
 	}
 
 	config.AppConfig = config.Config{
 		PrivateKey:     base64.StdEncoding.EncodeToString(privKey),
-		EndpointV4:     updatedAccountData.Config.Peers[0].Endpoint.V4[:len(updatedAccountData.Config.Peers[0].Endpoint.V4)-2],
-		EndpointV6:     updatedAccountData.Config.Peers[0].Endpoint.V6[1 : len(updatedAccountData.Config.Peers[0].Endpoint.V6)-3],
-		EndpointPubKey: updatedAccountData.Config.Peers[0].PublicKey,
-		License:        updatedAccountData.Account.License,
+		EndpointV4:     endpointV4,
+		EndpointV6:     endpointV6,
+		EndpointH2V4:   config.DefaultEndpointH2V4,
+		EndpointH2V6:   config.DefaultEndpointH2V6,
+		EndpointPubKey: peer.PublicKey,
 		ID:             updatedAccountData.ID,
 		AccessToken:    accountData.Token,
 		IPv4:           updatedAccountData.Config.Interface.Addresses.V4,
@@ -110,12 +113,35 @@ func Register(configPath string, deviceName string) string {
 	return ""
 }
 
-// IsRegistered checks if a valid configuration exists
+// normalizePeerEndpoint converts the API's endpoint notation to a literal IP
+// without a port. Cloudflare currently returns IPv4 as address:port and IPv6
+// as [address]:port, but this also handles plain addresses safely.
+func normalizePeerEndpoint(raw string, optional bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" && optional {
+		return "", nil
+	}
+
+	host := raw
+	if parsedHost, _, err := net.SplitHostPort(raw); err == nil {
+		host = parsedHost
+	} else if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		host = raw[1 : len(raw)-1]
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", fmt.Errorf("invalid endpoint %q", raw)
+	}
+	return ip.String(), nil
+}
+
+// IsRegistered checks if a valid configuration exists.
 func IsRegistered(configPath string) bool {
 	return config.LoadConfig(configPath) == nil
 }
 
-// GetAssignedIPv4 returns the assigned IPv4 address from config
+// GetAssignedIPv4 returns the assigned IPv4 address from config.
 func GetAssignedIPv4(configPath string) string {
 	if err := config.LoadConfig(configPath); err != nil {
 		return ""
@@ -123,7 +149,7 @@ func GetAssignedIPv4(configPath string) string {
 	return config.AppConfig.IPv4
 }
 
-// GetAssignedIPv6 returns the assigned IPv6 address from config
+// GetAssignedIPv6 returns the assigned IPv6 address from config.
 func GetAssignedIPv6(configPath string) string {
 	if err := config.LoadConfig(configPath); err != nil {
 		return ""
@@ -131,350 +157,386 @@ func GetAssignedIPv6(configPath string) string {
 	return config.AppConfig.IPv6
 }
 
-// AndroidTunDevice wraps the Android TUN file descriptor for packet IO
+// AndroidTunDevice wraps the Android TUN file descriptor for packet IO. It
+// duplicates the descriptor on construction, so Go owns and closes its copy;
+// Android remains responsible for the descriptor passed from ParcelFileDescriptor.
 type AndroidTunDevice struct {
-	fd       int
 	file     *os.File
-	mtu      int
-	inputCh  chan []byte
 	outputFn PacketFlow
+	writeMu  sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
 }
 
-// NewAndroidTunDevice creates a new Android TUN device wrapper
-func newAndroidTunDevice(fd int, mtu int, packetFlow PacketFlow) (*AndroidTunDevice, error) {
-	// Create a file from the file descriptor
-	file := os.NewFile(uintptr(fd), "tun")
+func newAndroidTunDevice(fd int, packetFlow PacketFlow) (*AndroidTunDevice, error) {
+	if fd < 0 {
+		return nil, fmt.Errorf("invalid TUN file descriptor %d", fd)
+	}
+	ownedFD, err := syscall.Dup(fd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to duplicate TUN fd %d: %v", fd, err)
+	}
+	file := os.NewFile(uintptr(ownedFD), "android-tun")
 	if file == nil {
+		_ = syscall.Close(ownedFD)
 		return nil, fmt.Errorf("failed to create file from fd %d", fd)
 	}
-
-	return &AndroidTunDevice{
-		fd:       fd,
-		file:     file,
-		mtu:      mtu,
-		inputCh:  make(chan []byte, 256),
-		outputFn: packetFlow,
-	}, nil
+	return &AndroidTunDevice{file: file, outputFn: packetFlow}, nil
 }
 
 func (d *AndroidTunDevice) ReadPacket(buf []byte) (int, error) {
-	n, err := d.file.Read(buf)
-	if err != nil {
-		return 0, err
+	if d.file == nil {
+		return 0, fmt.Errorf("TUN device is closed")
 	}
-	return n, nil
+	for {
+		n, err := d.file.Read(buf)
+		if err == nil || (!errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EWOULDBLOCK)) {
+			return n, err
+		}
+		// Android releases before Builder.setBlocking(true) expose a
+		// non-blocking TUN fd. Avoid a tight spin while waiting for a packet;
+		// closing the descriptor during shutdown breaks this loop promptly.
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (d *AndroidTunDevice) WritePacket(pkt []byte) error {
+	d.writeMu.Lock()
+	defer d.writeMu.Unlock()
+
 	if d.outputFn != nil {
-		// Use the callback to write to Android TUN
 		d.outputFn.WritePacket(pkt)
 		return nil
 	}
-	// Fallback to direct write
+	if d.file == nil {
+		return fmt.Errorf("TUN device is closed")
+	}
 	_, err := d.file.Write(pkt)
 	return err
 }
 
 func (d *AndroidTunDevice) Close() error {
-	if d.file != nil {
-		return d.file.Close()
-	}
-	return nil
+	d.closeOnce.Do(func() {
+		if d.file != nil {
+			d.closeErr = d.file.Close()
+		}
+	})
+	return d.closeErr
 }
 
 // StartTunnel starts the VPN tunnel using the provided TUN file descriptor.
-// This function connects directly to Cloudflare WARP and forwards all traffic.
-//
-// Parameters:
-//   - configPath: Path to the config.json file
-//   - tunFd: The file descriptor of the Android TUN interface
-//   - mtu: MTU size (usually 1280)
-//   - packetFlow: Interface for writing packets back to Android TUN
-//   - callback: State callback interface (can be nil)
-//
-// Returns:
-//   - error string if startup fails, empty string on success
+// It returns only validation/setup errors; connection establishment and
+// reconnects are reported through callback notifications.
 func StartTunnel(configPath string, tunFd int, mtu int, packetFlow PacketFlow, callback VpnStateCallback) string {
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	if mtu <= 0 || mtu > 65535 {
+		return fmt.Sprintf("Invalid MTU: %d", mtu)
+	}
 
+	state.mu.Lock()
 	if state.running {
+		state.mu.Unlock()
 		return "Tunnel is already running"
 	}
 
-	log.Printf("StartTunnel called: configPath=%s, tunFd=%d, mtu=%d", configPath, tunFd, mtu)
-
-	// Load config
 	if err := config.LoadConfig(configPath); err != nil {
+		state.mu.Unlock()
 		return fmt.Sprintf("Failed to load config: %v", err)
 	}
 
-	// Get keys
 	privKey, err := config.AppConfig.GetEcPrivateKey()
 	if err != nil {
+		state.mu.Unlock()
 		return fmt.Sprintf("Failed to get private key: %v", err)
 	}
 	peerPubKey, err := config.AppConfig.GetEcEndpointPublicKey()
 	if err != nil {
+		state.mu.Unlock()
 		return fmt.Sprintf("Failed to get peer public key: %v", err)
 	}
 
-	// Generate certificate
 	cert, err := internal.GenerateCert(privKey, &privKey.PublicKey)
 	if err != nil {
+		state.mu.Unlock()
 		return fmt.Sprintf("Failed to generate cert: %v", err)
 	}
 
-	// Prepare TLS config with custom SNI
+	optionsMu.RLock()
 	sni := customSNI
+	endpointOverride := customEndpoint
+	optionsMu.RUnlock()
 	if sni == "" {
 		sni = internal.ConnectSNI
 	}
-	log.Printf("Using SNI: %s", sni)
-	tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
+
+	tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni, false)
 	if err != nil {
+		state.mu.Unlock()
 		return fmt.Sprintf("Failed to prepare TLS: %v", err)
 	}
 
-	// Create Android TUN device wrapper
-	tunDevice, err := newAndroidTunDevice(tunFd, mtu, packetFlow)
+	var endpoint *net.UDPAddr
+	if endpointOverride != "" {
+		endpoint, err = parseEndpoint(endpointOverride)
+	} else {
+		var configuredEndpoint net.Addr
+		configuredEndpoint, err = config.SelectEndpointFromConfig(false, false, 443)
+		if err == nil {
+			endpoint, _ = configuredEndpoint.(*net.UDPAddr)
+		}
+	}
 	if err != nil {
+		state.mu.Unlock()
+		return fmt.Sprintf("Invalid tunnel endpoint: %v", err)
+	}
+	if endpoint == nil {
+		state.mu.Unlock()
+		return "Invalid tunnel endpoint: expected UDP endpoint"
+	}
+
+	tunDevice, err := newAndroidTunDevice(tunFd, packetFlow)
+	if err != nil {
+		state.mu.Unlock()
 		return fmt.Sprintf("Failed to create TUN device: %v", err)
 	}
 
-	// Endpoint - use custom endpoint if set, otherwise use config default
-	var endpoint *net.UDPAddr
-	if customEndpoint != "" {
-		// Parse custom endpoint (supports host:port format)
-		host, port, err := parseEndpoint(customEndpoint)
-		if err != nil {
-			return fmt.Sprintf("Invalid custom endpoint '%s': %v", customEndpoint, err)
-		}
-		endpoint = &net.UDPAddr{
-			IP:   net.ParseIP(host),
-			Port: port,
-		}
-		log.Printf("Using custom endpoint: %s:%d", host, port)
-	} else {
-		// Use default from config (IPv4)
-		endpoint = &net.UDPAddr{
-			IP:   net.ParseIP(config.AppConfig.EndpointV4),
-			Port: 443,
-		}
-		log.Printf("Using default endpoint: %s:443", config.AppConfig.EndpointV4)
-	}
-
-	// Create context for cancellation
 	ctx, cancel := context.WithCancel(context.Background())
+	state.runID++
+	runID := state.runID
 	state.cancel = cancel
-	state.running = true
 	state.callback = callback
+	state.device = tunDevice
+	state.running = true
+	state.connected = false
+	state.mu.Unlock()
 
-	// Start tunnel maintenance in background
+	log.Printf("Starting MASQUE tunnel: endpoint=%s, sni=%s, mtu=%d", endpoint, sni, mtu)
 	go func() {
-		log.Println("Starting MASQUE tunnel...")
-
-		// Notify connected after a brief delay for connection establishment
-		go func() {
-			time.Sleep(3 * time.Second)
-			state.mu.Lock()
-			running := state.running
-			state.mu.Unlock()
-			if running && callback != nil {
-				callback.OnConnected()
-			}
-		}()
-
-		api.MaintainTunnel(ctx, tlsConfig, 30*time.Second, 1242, endpoint, tunDevice, mtu, time.Second)
-
-		// Tunnel exited
-		log.Println("MASQUE tunnel exited")
-		tunDevice.Close()
+		defer func() { _ = tunDevice.Close() }()
+		api.MaintainTunnel(ctx, api.MaintainTunnelConfig{
+			TLSConfig:         tlsConfig,
+			KeepalivePeriod:   30 * time.Second,
+			InitialPacketSize: 1242,
+			Endpoint:          endpoint,
+			Device:            tunDevice,
+			MTU:               mtu,
+			ReconnectDelay:    time.Second,
+			AlwaysReconnect:   true,
+			UseHTTP2:          false,
+			OnConnected: func() {
+				state.mu.Lock()
+				if !state.running || state.runID != runID {
+					state.mu.Unlock()
+					return
+				}
+				state.connected = true
+				cb := state.callback
+				state.mu.Unlock()
+				if cb != nil {
+					cb.OnConnected()
+				}
+			},
+			OnConnectionLost: func() {
+				state.mu.Lock()
+				if !state.running || state.runID != runID {
+					state.mu.Unlock()
+					return
+				}
+				state.connected = false
+				cb := state.callback
+				state.mu.Unlock()
+				if cb != nil {
+					cb.OnDisconnected("Connection lost; retrying")
+				}
+			},
+		})
 
 		state.mu.Lock()
+		if state.runID != runID {
+			state.mu.Unlock()
+			return
+		}
+		wasRunning := state.running
+		cb := state.callback
 		state.running = false
+		state.connected = false
+		state.cancel = nil
+		state.callback = nil
+		state.device = nil
 		state.mu.Unlock()
 
-		if callback != nil {
-			callback.OnDisconnected("Tunnel closed")
+		if wasRunning && cb != nil {
+			cb.OnDisconnected("Tunnel stopped")
 		}
+		log.Println("MASQUE tunnel exited")
 	}()
 
-	log.Println("Tunnel started successfully")
 	return ""
 }
 
-// InputPacket sends an IP packet from Android TUN to the Go tunnel.
-// This should be called by Android whenever a packet is read from the TUN device.
-//
-// Parameters:
-//   - data: The raw IP packet bytes
-func InputPacket(data []byte) {
-	state.mu.Lock()
-	ch := state.inputChan
-	state.mu.Unlock()
+// InputPacket is retained for binary compatibility with the original Android
+// wrapper. Packet reads are now performed directly by the Go TUN reader, so
+// callers must not use this method to feed packets.
+func InputPacket(_ []byte) {}
 
-	if ch != nil {
-		// Non-blocking send
-		select {
-		case ch <- data:
-		default:
-			// Channel full, drop packet
-		}
-	}
-}
-
-// StopTunnel stops the running tunnel
+// StopTunnel cancels the supervisor and closes Go's owned TUN duplicate so a
+// blocked device read is woken immediately. Android closes its own descriptor
+// copy as part of service cleanup.
 func StopTunnel() {
 	state.mu.Lock()
-	defer state.mu.Unlock()
-
 	if !state.running {
+		state.mu.Unlock()
 		return
 	}
 
-	log.Println("Stopping tunnel...")
-
-	if state.cancel != nil {
-		state.cancel()
-	}
-
+	cancel := state.cancel
+	device := state.device
 	state.running = false
+	state.connected = false
+	state.cancel = nil
+	state.callback = nil
+	state.device = nil
+	state.mu.Unlock()
+
+	log.Println("Stopping tunnel...")
+	if cancel != nil {
+		cancel()
+	}
+	if device != nil {
+		_ = device.Close()
+	}
 }
 
-// IsRunning returns true if the tunnel is currently running
+// IsRunning returns true while the Go tunnel supervisor is active.
 func IsRunning() bool {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	return state.running
 }
 
-// GetVersion returns the library version
+// IsConnected reports whether the most recent Connect-IP handshake succeeded.
+func IsConnected() bool {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.connected
+}
+
+// GetVersion returns the Android wrapper version.
 func GetVersion() string {
-	return "1.0.3-android"
+	return "1.0.4-android"
 }
 
-// parseEndpoint parses an endpoint string in the format:
-// - "host:port" for IPv4 (e.g., "162.159.198.2:443")
-// - "[host]:port" for IPv6 (e.g., "[2606:4700:103::]:1701")
-// - "host" without port (defaults to 443)
-func parseEndpoint(endpoint string) (string, int, error) {
-	// Check if it's an IPv6 address with brackets
-	if len(endpoint) > 0 && endpoint[0] == '[' {
-		// IPv6 format: [host]:port
-		closeBracket := -1
-		for i, c := range endpoint {
-			if c == ']' {
-				closeBracket = i
-				break
-			}
-		}
-		if closeBracket == -1 {
-			return "", 0, fmt.Errorf("missing closing bracket for IPv6 address")
-		}
+// parseEndpoint parses host[:port], [ipv6][:port], or a bare IP/hostname.
+// The returned address is resolved once so MaintainTunnel always receives the
+// concrete *net.UDPAddr it requires.
+func parseEndpoint(raw string) (*net.UDPAddr, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("endpoint is empty")
+	}
 
-		host := endpoint[1:closeBracket]
-
-		// Check for port after bracket
-		if closeBracket+1 < len(endpoint) && endpoint[closeBracket+1] == ':' {
-			portStr := endpoint[closeBracket+2:]
-			port, err := strconv.Atoi(portStr)
+	host := raw
+	port := 443
+	switch {
+	case strings.HasPrefix(raw, "["):
+		if h, p, err := net.SplitHostPort(raw); err == nil {
+			host = h
+			port, err = strconv.Atoi(p)
 			if err != nil {
-				return "", 0, fmt.Errorf("invalid port: %s", portStr)
+				return nil, fmt.Errorf("invalid port %q", p)
 			}
-			return host, port, nil
+		} else if strings.HasSuffix(raw, "]") {
+			host = raw[1 : len(raw)-1]
+		} else {
+			return nil, fmt.Errorf("invalid bracketed endpoint %q", raw)
 		}
-
-		// No port, use default
-		return host, 443, nil
-	}
-
-	// IPv4 or hostname format
-	lastColon := -1
-	for i := len(endpoint) - 1; i >= 0; i-- {
-		if endpoint[i] == ':' {
-			lastColon = i
-			break
-		}
-	}
-
-	if lastColon != -1 {
-		// Has port
-		host := endpoint[:lastColon]
-		portStr := endpoint[lastColon+1:]
-		port, err := strconv.Atoi(portStr)
+	case strings.Count(raw, ":") == 1:
+		h, p, err := net.SplitHostPort(raw)
 		if err != nil {
-			return "", 0, fmt.Errorf("invalid port: %s", portStr)
+			return nil, fmt.Errorf("invalid endpoint %q: %v", raw, err)
 		}
-		return host, port, nil
+		host = h
+		port, err = strconv.Atoi(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port %q", p)
+		}
+	case strings.Count(raw, ":") > 1:
+		if net.ParseIP(raw) == nil {
+			return nil, fmt.Errorf("IPv6 endpoints with a port must use [host]:port")
+		}
 	}
 
-	// No port, use default
-	return endpoint, 443, nil
-}
+	if host == "" {
+		return nil, fmt.Errorf("endpoint host is empty")
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("port %d is outside 1..65535", port)
+	}
 
-// ============================================
-// Connection Configuration Functions
-// ============================================
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %v", host, err)
+	}
+	return addr, nil
+}
 
 // SetSNI sets a custom SNI for the TLS connection.
-// This can help with censorship circumvention.
-// Default is "www.visa.cn". Pass empty string to use Cloudflare's default.
 func SetSNI(sni string) {
-	customSNI = sni
+	optionsMu.Lock()
+	customSNI = strings.TrimSpace(sni)
+	optionsMu.Unlock()
 	log.Printf("SNI set to: %s", sni)
 }
 
-// GetSNI returns the current SNI setting
+// GetSNI returns the current SNI setting.
 func GetSNI() string {
+	optionsMu.RLock()
+	defer optionsMu.RUnlock()
 	return customSNI
 }
 
-// SetEndpoint sets a custom endpoint for the MASQUE connection.
-// Supports the following formats:
-//   - "162.159.198.2" (IPv4, default port 443)
-//   - "162.159.198.2:1701" (IPv4 with custom port)
-//   - "[2606:4700:103::]" (IPv6, default port 443)
-//   - "[2606:4700:103::]:1701" (IPv6 with custom port)
-//
-// Pass empty string to use the default endpoint from config.json.
+// SetEndpoint sets a custom MASQUE endpoint. Empty resets to the registered
+// endpoint in config.json.
 func SetEndpoint(endpoint string) {
-	customEndpoint = endpoint
+	optionsMu.Lock()
+	customEndpoint = strings.TrimSpace(endpoint)
+	optionsMu.Unlock()
 	log.Printf("Custom endpoint set to: %s", endpoint)
 }
 
-// GetEndpoint returns the current custom endpoint setting
+// GetEndpoint returns the current custom endpoint setting.
 func GetEndpoint() string {
+	optionsMu.RLock()
+	defer optionsMu.RUnlock()
 	return customEndpoint
 }
 
-// GetDefaultEndpoint returns the default endpoint from config (IPv4:443)
+// GetDefaultEndpoint returns the registered IPv4 endpoint with port 443.
 func GetDefaultEndpoint(configPath string) string {
-	if err := config.LoadConfig(configPath); err == nil {
-		return config.AppConfig.EndpointV4 + ":443"
+	if err := config.LoadConfig(configPath); err != nil {
+		return ""
 	}
-	return ""
+	endpoint, err := config.SelectEndpointFromConfig(false, false, 443)
+	if err != nil {
+		return ""
+	}
+	return endpoint.String()
 }
 
-// ResetConnectionOptions resets all connection options to defaults
+// ResetConnectionOptions resets all connection options to defaults.
 func ResetConnectionOptions() {
+	optionsMu.Lock()
 	customSNI = "www.visa.cn"
 	customEndpoint = ""
+	optionsMu.Unlock()
 	log.Println("Connection options reset to defaults")
 }
 
-// ============================================
-// Alternative: File Descriptor based approach
-// ============================================
-
-// StartTunnelWithFd starts the tunnel by reading/writing directly to the TUN fd.
-// This is simpler but requires the TUN fd to be readable/writable from Go.
+// StartTunnelWithFd starts the tunnel by reading/writing directly to the TUN
+// fd. The caller owns the fd and must close it after StopTunnel.
 func StartTunnelWithFd(configPath string, tunFd int, callback VpnStateCallback) string {
 	return StartTunnel(configPath, tunFd, 1280, nil, callback)
 }
 
-// fdReadWriter wraps a file descriptor for io.ReadWriter
 type fdReadWriter struct {
 	file *os.File
 }
@@ -487,8 +549,7 @@ func (f *fdReadWriter) Write(p []byte) (n int, err error) {
 	return f.file.Write(p)
 }
 
-// CreateTunReadWriter creates an io.ReadWriter from a TUN file descriptor
+// CreateTunReadWriter creates an io.ReadWriter from a TUN file descriptor.
 func CreateTunReadWriter(fd int) io.ReadWriter {
-	file := os.NewFile(uintptr(fd), "tun")
-	return &fdReadWriter{file: file}
+	return &fdReadWriter{file: os.NewFile(uintptr(fd), "tun")}
 }

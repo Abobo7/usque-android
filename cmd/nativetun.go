@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"log"
-	"net"
 	"time"
 
 	"github.com/Diniboy1123/usque/api"
@@ -18,6 +17,7 @@ type tunDevice struct {
 	iproute2 bool
 	ipv4     bool
 	ipv6     bool
+	persist  bool
 }
 
 var nativeTunCmd = &cobra.Command{
@@ -53,7 +53,13 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
-		tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni)
+		insecure, err := cmd.Flags().GetBool("insecure")
+		if err != nil {
+			cmd.Printf("Failed to get insecure flag: %v\n", err)
+			return
+		}
+
+		tlsConfig, err := api.PrepareTlsConfig(privKey, peerPubKey, cert, sni, insecure)
 		if err != nil {
 			cmd.Printf("Failed to prepare TLS config: %v\n", err)
 			return
@@ -76,17 +82,30 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
-		var endpoint *net.UDPAddr
-		if ipv6, err := cmd.Flags().GetBool("ipv6"); err == nil && !ipv6 {
-			endpoint = &net.UDPAddr{
-				IP:   net.ParseIP(config.AppConfig.EndpointV4),
-				Port: connectPort,
-			}
-		} else {
-			endpoint = &net.UDPAddr{
-				IP:   net.ParseIP(config.AppConfig.EndpointV6),
-				Port: connectPort,
-			}
+		useHTTP2, err := cmd.Flags().GetBool("http2")
+		if err != nil {
+			cmd.Printf("Failed to get HTTP/2 flag: %v\n", err)
+			return
+		}
+
+		useIPv6, err := cmd.Flags().GetBool("ipv6")
+		if err != nil {
+			cmd.Printf("Failed to get ipv6 flag: %v\n", err)
+			return
+		}
+
+		endpoint, err := config.SelectEndpointFromConfig(useHTTP2, useIPv6, connectPort)
+		if err != nil {
+			cmd.Printf("Failed to select endpoint: %v\n", err)
+			return
+		}
+
+		if insecure {
+			config.WarnInsecure()
+		}
+
+		if useHTTP2 {
+			config.LogHTTP2Endpoint(endpoint)
 		}
 
 		tunnelIPv4, err := cmd.Flags().GetBool("no-tunnel-ipv4")
@@ -122,6 +141,12 @@ var nativeTunCmd = &cobra.Command{
 			return
 		}
 
+		alwaysReconnect, err := cmd.Flags().GetBool("always-reconnect")
+		if err != nil {
+			cmd.Printf("Failed to get always-reconnect flag: %v\n", err)
+			return
+		}
+
 		interfaceName, err := cmd.Flags().GetString("interface-name")
 		if err != nil {
 			cmd.Printf("Failed to get interface name: %v\n", err)
@@ -136,12 +161,31 @@ var nativeTunCmd = &cobra.Command{
 			}
 		}
 
+		persist, err := cmd.Flags().GetBool("persist")
+		if err != nil {
+			cmd.Printf("Failed to get persist flag: %v\n", err)
+			return
+		}
+
+		onConnect, err := cmd.Flags().GetString("on-connect")
+		if err != nil {
+			cmd.Printf("Failed to get on-connect flag: %v\n", err)
+			return
+		}
+
+		onDisconnect, err := cmd.Flags().GetString("on-disconnect")
+		if err != nil {
+			cmd.Printf("Failed to get on-disconnect flag: %v\n", err)
+			return
+		}
+
 		t := &tunDevice{
 			name:     interfaceName,
 			mtu:      mtu,
 			iproute2: !setIproute2,
 			ipv4:     !tunnelIPv4,
 			ipv6:     !tunnelIPv6,
+			persist:  persist,
 		}
 
 		dev, err := t.create()
@@ -152,7 +196,27 @@ var nativeTunCmd = &cobra.Command{
 
 		log.Printf("Created TUN device: %s", t.name)
 
-		go api.MaintainTunnel(context.Background(), tlsConfig, keepalivePeriod, initialPacketSize, endpoint, dev, mtu, reconnectDelay)
+		hookEnv := map[string]string{
+			"USQUE_MODE":  "nativetun",
+			"USQUE_IFACE": t.name,
+			"USQUE_IPV4":  config.AppConfig.IPv4,
+			"USQUE_IPV6":  config.AppConfig.IPv6,
+		}
+
+		go api.MaintainTunnel(context.Background(), api.MaintainTunnelConfig{
+			TLSConfig:         tlsConfig,
+			KeepalivePeriod:   keepalivePeriod,
+			InitialPacketSize: initialPacketSize,
+			Endpoint:          endpoint,
+			Device:            dev,
+			MTU:               mtu,
+			ReconnectDelay:    reconnectDelay,
+			AlwaysReconnect:   alwaysReconnect,
+			UseHTTP2:          useHTTP2,
+			OnConnect:         onConnect,
+			OnDisconnect:      onDisconnect,
+			HookEnv:           hookEnv,
+		})
 
 		log.Println("Tunnel established, you may now set up routing and DNS")
 
@@ -168,9 +232,15 @@ func init() {
 	nativeTunCmd.Flags().StringP("sni-address", "s", internal.ConnectSNI, "SNI address to use for MASQUE connection")
 	nativeTunCmd.Flags().DurationP("keepalive-period", "k", 30*time.Second, "Keepalive period for MASQUE connection")
 	nativeTunCmd.Flags().IntP("mtu", "m", 1280, "MTU for MASQUE connection")
-	nativeTunCmd.Flags().Uint16P("initial-packet-size", "i", 1242, "Initial packet size for MASQUE connection")
+	nativeTunCmd.Flags().Uint16P("initial-packet-size", "i", 0, "Custom initial packet size for MASQUE connection (default: auto with PMTU discovery)")
 	nativeTunCmd.Flags().BoolP("no-iproute2", "I", false, "Linux only: Do not set up IP addresses and do not set the link up")
 	nativeTunCmd.Flags().DurationP("reconnect-delay", "r", 1*time.Second, "Delay between reconnect attempts")
-	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom inteface name for the TUN interface")
+	nativeTunCmd.Flags().Bool("always-reconnect", false, "Always reconnect after tunnel loss, even when idle")
+	nativeTunCmd.Flags().Bool("http2", false, "Use HTTP/2 over TCP+TLS instead of HTTP/3 over QUIC."+config.EndpointHelpSuffixH2)
+	nativeTunCmd.Flags().Bool("insecure", false, "Disable endpoint certificate pinning and trust any certificate")
+	nativeTunCmd.Flags().StringP("interface-name", "n", "", "Custom interface name for the TUN interface")
+	nativeTunCmd.Flags().Bool("persist", false, "Linux only: Keep the TUN interface after exit")
+	nativeTunCmd.Flags().String("on-connect", "", "Path to an executable to run after each successful tunnel connect (no args; context via USQUE_* env vars)")
+	nativeTunCmd.Flags().String("on-disconnect", "", "Path to an executable to run after each tunnel disconnect (no args; context via USQUE_* env vars)")
 	rootCmd.AddCommand(nativeTunCmd)
 }

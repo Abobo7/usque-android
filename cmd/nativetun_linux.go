@@ -18,7 +18,8 @@ var longDescription = "Expose Warp as a native TUN device that accepts any IP tr
 
 func (t *tunDevice) create() (api.TunnelDevice, error) {
 	platformSpecificParams := water.PlatformSpecificParams{
-		Name: t.name,
+		Name:    t.name,
+		Persist: t.persist,
 	}
 
 	dev, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: platformSpecificParams})

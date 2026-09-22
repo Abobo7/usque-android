@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"github.com/Diniboy1123/usque/config"
+	"github.com/Diniboy1123/usque/internal"
 	"github.com/spf13/cobra"
 )
 
@@ -31,5 +32,6 @@ func Execute() error {
 }
 
 func init() {
+	internal.InstallDefaultLogTZStamp()
 	rootCmd.PersistentFlags().StringP("config", "c", "config.json", "config file (default is config.json)")
 }

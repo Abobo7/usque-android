@@ -1,15 +1,19 @@
-.PHONY: android clean
+.PHONY: android clean init help
+
+GOMOBILE_VERSION ?= v0.0.0-20251209145715-2553ed8ce294
+GOBIN ?= $(shell go env GOPATH)/bin
+GOMOBILE ?= $(GOBIN)/gomobile
 
 # Build AAR for Android
 # Requires:
-#   - Go 1.24.1+
-#   - gomobile: go install golang.org/x/mobile/cmd/gomobile@latest
+#   - Go version declared in ../go.mod
+#   - gomobile (initialized with `make init`)
 #   - Android NDK
-#   - ANDROID_HOME environment variable set
+#   - ANDROID_HOME or ANDROID_SDK_ROOT environment variable set
 
 android:
 	@echo "Building usque.aar for Android..."
-	gomobile bind -v \
+	$(GOMOBILE) bind -v \
 		-target=android/arm64,android/arm \
 		-androidapi 24 \
 		-ldflags="-s -w" \
@@ -19,8 +23,9 @@ android:
 
 # Initialize gomobile (run once)
 init:
-	go install golang.org/x/mobile/cmd/gomobile@latest
-	gomobile init -v
+	GOBIN=$(GOBIN) go install golang.org/x/mobile/cmd/gomobile@$(GOMOBILE_VERSION)
+	$(GOMOBILE) init -v
+	GOBIN=$(GOBIN) go install golang.org/x/mobile/cmd/gobind@$(GOMOBILE_VERSION)
 
 clean:
 	rm -f usque.aar usque-sources.jar
