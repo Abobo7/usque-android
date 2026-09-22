@@ -1,0 +1,48 @@
+name: Repair upstream merge history
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/repair-upstream-history.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair-history:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Preserve current chain and rebuild real merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'Abobo'
+          git config user.email '113653079+Abobo7@users.noreply.github.com'
+          current_sha="$GITHUB_SHA"
+          git remote add upstream https://github.com/Diniboy1123/usque.git
+          git fetch --no-tags upstream main
+          upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
+          test "$upstream_sha" = "6aa03fc97d12848dce34eedbd187fb1077b5d1ea"
+          git cat-file -e b990c29e745e9d7272958ffb27c865fb73c2d573^{commit}
+          backup_branch="backup/api-rebuilt-main-$GITHUB_RUN_ID"
+          git push origin "HEAD:refs/heads/$backup_branch"
+          git rm .github/workflows/repair-upstream-history.yml
+          repaired_tree="$(git write-tree)"
+          repaired_commit="$(printf '%s\n' 'Merge upstream and preserve Android fixes' | git commit-tree "$repaired_tree" -p b990c29e745e9d7272958ffb27c865fb73c2d573 -p "$upstream_sha")"
+          git push --force-with-lease="refs/heads/main:$current_sha" origin "$repaired_commit:refs/heads/main"
+          printf 'repaired_commit=%s\n' "$repaired_commit"
+          {
+            printf '## Repository history repaired\n\n'
+            printf -- '- Repaired merge commit: %s\n' "$repaired_commit"
+            printf -- '- First parent: b990c29e745e9d7272958ffb27c865fb73c2d573\n'
+            printf -- '- Second parent: %s\n' "$upstream_sha"
+            printf -- '- Backup branch: %s\n' "$backup_branch"
+          } >> "$GITHUB_STEP_SUMMARY"
